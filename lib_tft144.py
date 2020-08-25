@@ -52,7 +52,8 @@ if __name__ == '__main__':
 
 
 from time import sleep
-import os
+import os, io
+import numpy as np
 GPIO = None
 
 TFTWIDTH    = 128
@@ -110,7 +111,7 @@ class TFT144:
     ORIENTATION180=192
     # Do you rotate the image, or the device?  :-)
 
-    def __init__(self, gpio, spidev, CE, dc_pin, rst_pin=0, led_pin=0, orientation=ORIENTATION0, isRedBoard=False, spi_speed=16000000):
+    def __init__(self, gpio, spidev, CE, dc_pin, rst_pin=0, led_pin=0, orientation=ORIENTATION90, isRedBoard=False, spi_speed=32000000):
         # CE is 0 or 1 for RPI, but is actual CE pin for virtGPIO
         # RST pin.  0  means soft reset (but reset pin still needs holding high (3V)
         # LED pin, may be tied to 3V (abt 14mA) or used on a 3V logic pin (abt 7mA)
@@ -149,6 +150,8 @@ class TFT144:
         # Black board may cope with 32000000 Hz. Red board up to 16000000. YMMV.
         sleep(0.5)
         self.init_LCD(orientation)
+        self.vfunc = np.vectorize(self._prepros_col)
+        self.mframe=None
 
     def led_on(self, onoff):
         if self.LED:
@@ -158,15 +161,9 @@ class TFT144:
     def colour565(self, r,g,b):
        return ((b & 0xF8) << 8) | ((g & 0xFC) << 3) | (r >> 3)
 
-    #functions to translate x,y pixel coords. to text column,row
-    def textX(self, x, font=3):
-       return x*(self.fontDim[font][0])
-
-    def textY(self, y, font=3):
-       return y*(self.fontDim[font][1])
-
     #initial LCD reset
     def reset_LCD(self):
+       self.mframe=None
        if self.RST == 0:
            self.write_command(SOFT_RESET)
        else:
@@ -185,9 +182,9 @@ class TFT144:
     #write data
     def write_data(self, data):
        GPIO.output(self.DC,True)
-       if not type(data) == type([]):   # is it already a list?
+       if not type(data) == type([]) and type(data).__module__ != np.__name__:   # is it already a list?
             data = [data]
-       self.SPI.writebytes(data)
+       self.SPI.writebytes2(data)
 
     #-------------------------------------------
 
@@ -229,6 +226,8 @@ class TFT144:
        self.write_command(SET_ADDRESS_MODE)
        self.write_data(orientation)
 
+       #self.write_command(ENTER_PARTIAL_MODE)
+
        self.clear_display(self.BLACK)
        self.write_command(SET_DISPLAY_ON)
     #   self.write_command(WRITE_MEMORY_START)
@@ -262,198 +261,41 @@ class TFT144:
        self.write_data([0,y1,0,y2])
 
 
-    # draw a dot in x,y with 'color' colour
-    def draw_dot(self, x,y,color):
-       color_hi=color>>8
-       color_lo= color&(~(65280))
-       self.set_frame(x, x+1, y, y+1)
-       self.write_command(WRITE_MEMORY_START)
-       self.write_data([color_hi,color_lo])
-
-    # Bresenham's algorithm to draw a line with integers
-    # x0<=x1, y0<=y1
-    def draw_line(self, x0,y0,x1,y1,color):
-       dy=y1-y0
-       dx=x1-x0
-       if (dy<0):
-          dy=-dy
-          stepy=-1
-       else:
-          stepy=1
-       if (dx<0):
-          dx=-dx
-          stepx=-1
-       else:
-          stepx=1
-       dx <<=1
-       dy <<=1
-       self.draw_dot(x0,y0,color)
-       if (dx>dy):
-          fraction=dy-(dx>>1)
-          while (x0!=x1):
-             if (fraction>=0):
-                y0 +=stepy
-                fraction -=dx
-             x0 +=stepx
-             fraction +=dy
-             self.draw_dot(x0,y0,color)
-       else:
-          fraction=dx-(dy>>1)
-          while (y0!=y1):
-             if (fraction>=0):
-                x0 +=stepx
-                fraction -=dy
-             y0 +=stepy
-             fraction +=dx
-             self.draw_dot(x0,y0,color)
-
-    # draws hollow rectangle
-    # x0<=x1, y0<= y1
-    def draw_rectangle(self, x0,y0,x1,y1,color):
-       self.draw_line(x0,y0,x0,y1,color)
-       self.draw_line(x0,y1,x1,y1,color)
-       self.draw_line(x1,y0,x1,y1,color)
-       self.draw_line(x0,y0,x1,y0,color)
-
-    # draws filled rectangle, fills frame memory section with same pixel
-    # x0<=x1, y0<=y1
-    def draw_filled_rectangle(self, x0,y0,x1,y1,color):
-       color_hi=color>>8
-       color_lo= color&(~(65280))
-       self.set_frame(x0, x1, y0, y1)
-
-       self.write_command(WRITE_MEMORY_START)
-       for pixels in range (0,(1+x1-x0)):
-            dbuf = [color_hi, color_lo] * (y1-y0)
-            self.write_data(dbuf)
-
-    #Bresenham's circle algorithm, circle can't pass screen boundaries
-    def draw_circle(self, x0,y0,radio,color):
-       error=1-radio
-       errorx=1
-       errory=-2*radio
-       y=radio
-       x=0
-       self.draw_dot(x0,y0+radio,color)
-       self.draw_dot(x0,y0-radio,color)
-       self.draw_dot(x0+radio,y0,color)
-       self.draw_dot(x0-radio,y0,color)
-       while (x<y):
-          if (error>=0):
-             y -=1
-             errory +=2
-             error +=errory
-          x +=1
-          errorx +=2
-          error +=errorx
-          self.draw_dot(x0+x,y0+y,color)
-          self.draw_dot(x0-x,y0+y,color)
-          self.draw_dot(x0+x,y0-y,color)
-          self.draw_dot(x0-x,y0-y,color)
-          self.draw_dot(x0+y,y0+x,color)
-          self.draw_dot(x0-y,y0+x,color)
-          self.draw_dot(x0+y,y0-x,color)
-          self.draw_dot(x0-y,y0-x,color)
-
-
-    fontDim = ([0], [4, 6, 1], [8, 12, 2], [6, 8, 1], [12, 16, 2], [8, 12, 1], [16, 24, 2], [8, 16, 1], [16, 32, 2] )
-    # Font dimensions for fonts 1-8.  [W, H, Scale]
-    fontW = 0   # These are valid only AFTER a char was displayed
-    fontH = 0
-
-    # writes a character in graphic coordinates x,y, with
-    # foreground and background colours
-    def put_char(self, character,x,y,fgcolor,bgcolor, font = 3):
-       fgcolor_hi=fgcolor>>8
-       fgcolor_lo= fgcolor&(~(65280))
-       bgcolor_hi=bgcolor>>8
-       bgcolor_lo= bgcolor&(~(65280))
-       self.fontW = self.fontDim[font][0]
-       self.fontH = self.fontDim[font][1]
-       fontScale = self.fontDim[font][2]
-       character = ord(character)
-       if not (font == 3 or font == 4):   # restricted char set 32-126 for most
-           if character < 32 or character > 126: # only strictly ascii chars
-             character = 0
-           else:
-             character -= 32
-       self.set_frame(x, (x+self.fontW-1), y, (y + self.fontH-1))
-       xx = [0]
-       if fontScale == 2:
-           xx = [0, 2, 2 * self.fontW, 2 + (2 * self.fontW) ]   # DOUBLE: every pixel becomes a 2x2 pixel
-
-       self.write_command(WRITE_MEMORY_START)
-       cbuf = [0] * (self.fontW * self.fontH * 2)
-       for row in range (0, int(self.fontH // fontScale)):
-          for column in range (0,int(self.fontW // fontScale)):
-             topleft = ((column*2*fontScale) + (row*2*self.fontW*fontScale))
-             if font <=2:
-                pixOn = (font4x6[character][row]) & (1<<column)
-             elif font >= 7:
-                pixOn = (font8x16[character][row]) & (1<<column)
-             elif font >= 5:
-                pixOn = (font8x12[character][row]) & (1<<column)
-             else:
-                pixOn = (font6x8[character][column]) & (1<<row)
-             if pixOn:
-                 for rpt in xx:    # one pixel or a 2x2 "doubled" pixel
-                    cbuf[rpt+topleft] = fgcolor_hi
-                    cbuf[rpt+1+topleft] = fgcolor_lo
-             else:
-                 for rpt in xx:
-                    cbuf[rpt+topleft] = bgcolor_hi
-                    cbuf[rpt+1+topleft] = bgcolor_lo
-       self.write_data(cbuf)
-
-
-    # writes a string in graphic x,y coordinates, with
-    # foreground and background colours. If edge of screen is reached,
-    # it wraps to next text line to same starting x coord.
-    def put_string(self, str,originx,y,fgcolor,bgcolor, font = 3):
-       x = originx
-       fontW = self.fontDim[font][0]
-       fontH = self.fontDim[font][1]
-       for char_number in range (0,len(str)):
-          if ((x+fontW)>TFTWIDTH):
-             x=originx
-             y +=(fontH)
-          if ((y+fontH)>TFTHEIGHT):
-             break
-          self.put_char(str[char_number],x,y,fgcolor,bgcolor, font)
-          x +=(fontW)
-
-
-
-    def draw_bmp(self, filename, x0=0, y0=0):
-        if not os.path.exists(filename):
+    def display(self, w, image, x0=0, y0=0):
+        if image is None:
             return False
-        with open(filename, 'rb') as bitmap_file:
-            bitmap_file.seek(18)
-            w = ord(bitmap_file.read(1))
-            bitmap_file.seek(22)
-            h = ord(bitmap_file.read(1))
-            bitmap_file.seek(10)
-            start = ord(bitmap_file.read(1))
-            bitmap_file.seek(start)
-            self.set_frame(x0, x0+w-1, y0, y0+h-1)
-            self.write_command(WRITE_MEMORY_START)
-            for y in range(h):   # 3 bytes of colour / pixel
-                  dbuf = [0] * (w*2)
-                  for x in range(w):
-                      b = ord(bitmap_file.read(1))
-                      g = ord(bitmap_file.read(1))
-                      r = ord(bitmap_file.read(1))
-                      RGB = self.colour565(r, g, b)
-                      #RGB = self.YELLOW
-                      dbuf[2*x] = RGB>>8
-                      dbuf[1 + (2*x)] = RGB&(~65280)
-                  self.write_data(dbuf)
-                  # Now, BMP has a 4byte alignment issue at end of each line   V1.0.1
-                  x = 3*w # bytes in line @ 3bytes/pixel
-                  while (x % 4):
-                      x += 1
-                      bitmap_file.read(1)   # waste a byte until aligned
+
+        self.set_frame()
+        self.write_command(WRITE_MEMORY_START)
+        img=self.v_preproc(image, w)
+        #if self.mframe is not None:
+        #dif=(self.mframe-img)>0
+        #img=dif*img
+        self.write_data(img)
+        #self.mframe=img+(np.invert(dif)*self.mframe)
+        #else:
+        #for row in img:
+	#self.write_data(img)
+        #self.mframe=img
         return True
+
+    def _prepros_col(self, b, g, r):
+        RGB = self.colour565(r, g, b)
+        c0=RGB>>8
+        c1=RGB&(~65280)
+        return c0,c1
+
+    def _channelSplit(self, image):
+        return np.dsplit(image,image.shape[-1])
+
+    def v_preproc(self, image, w):
+        
+        [B,G,R]=self._channelSplit(image)
+        a, b = self.vfunc(B,G,R)
+        c = np.empty((a.size + b.size,), dtype=np.uint8)
+        c[0::2] = a.flatten()
+        c[1::2] = b.flatten()
+        return c.reshape(-1, w*2)
 
     def invert_screen(self):
        self.write_command(ENTER_INVERT_MODE)
